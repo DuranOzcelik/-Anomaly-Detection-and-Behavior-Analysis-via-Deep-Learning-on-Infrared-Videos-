@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
-import 'package:http/http.dart' as http;
 import 'dart:io';
+import 'services/api_service.dart';
+import 'widgets/video_heatmap_overlay.dart';
 
 void main() {
   runApp(const MyApp());
@@ -34,15 +35,16 @@ class _AnomalyDetectionPageState extends State<AnomalyDetectionPage> {
   String? _selectedVideoPath;
   String? _selectedVideoName;
   bool _isProcessing = false;
-  String? _jobId;
 
   // Results
   String? _resultLabel;
   double? _resultConfidence;
   int? _resultLatency;
+  String? _resultHeatmap;
   bool _hasResults = false;
+  bool _showHeatmap = false;
 
-  final String _backendUrl = 'http://localhost:8000';
+  final ApiService _apiService = ApiService();
 
   Future<void> _pickVideo() async {
     FilePickerResult? result = await FilePicker.platform.pickFiles(
@@ -67,39 +69,27 @@ class _AnomalyDetectionPageState extends State<AnomalyDetectionPage> {
     setState(() {
       _isProcessing = true;
       _hasResults = false;
+      _showHeatmap = false;
     });
 
     try {
       final file = File(_selectedVideoPath!);
-      final request = http.MultipartRequest(
-        'POST',
-        Uri.parse('$_backendUrl/process-video'),
-      );
+      final response = await _apiService.uploadVideo(file);
 
-      request.files.add(
-        await http.MultipartFile.fromPath('file', file.path),
-      );
+      setState(() {
+        _resultLabel = response.classification;
+        _resultConfidence = response.confidence;
+        _resultLatency = response.latencyMs;
+        _resultHeatmap = response.heatmapBase64;
+        _hasResults = true;
+      });
 
-      final response = await request.send();
-      final _ = await response.stream.bytesToString();
-
-      if (response.statusCode == 200) {
-        final jobId = 'job_${DateTime.now().millisecondsSinceEpoch}';
-
-        setState(() {
-          _jobId = jobId;
-        });
-
-        _showSnackBar('Video yüklendi! İşleniyor...', Colors.green);
-
-        // Simulate processing with mock results
-        await Future.delayed(const Duration(seconds: 2));
-        _getMockResults();
-      } else {
-        _showSnackBar('Video yüklenemedi', Colors.red);
-      }
+      _showSnackBar('Video işlendi! Sonuçlar yüklendi.', Colors.green);
     } catch (e) {
       _showSnackBar('Hata: $e', Colors.red);
+      setState(() {
+        _hasResults = false;
+      });
     } finally {
       setState(() {
         _isProcessing = false;
@@ -107,21 +97,12 @@ class _AnomalyDetectionPageState extends State<AnomalyDetectionPage> {
     }
   }
 
-  void _getMockResults() {
-    setState(() {
-      _hasResults = true;
-      _resultLabel = 'Normal';
-      _resultConfidence = 0.87;
-      _resultLatency = 1240; // ms
-    });
-  }
-
   void _showSnackBar(String message, Color color) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(message),
         backgroundColor: color,
-        duration: const Duration(seconds: 2),
+        duration: const Duration(seconds: 3),
       ),
     );
   }
@@ -271,7 +252,7 @@ class _AnomalyDetectionPageState extends State<AnomalyDetectionPage> {
               ),
             ),
           ),
-          // Right Panel - Results
+          // Right Panel - Results & Heatmap
           Expanded(
             flex: 1,
             child: Container(
@@ -377,6 +358,25 @@ class _AnomalyDetectionPageState extends State<AnomalyDetectionPage> {
                                 ),
                               ],
                             ),
+                          const SizedBox(height: 24),
+                          // Heatmap Button
+                          if (_resultHeatmap != null)
+                            SizedBox(
+                              width: double.infinity,
+                              child: ElevatedButton.icon(
+                                onPressed: () {
+                                  setState(() {
+                                    _showHeatmap = !_showHeatmap;
+                                  });
+                                },
+                                icon: Icon(_showHeatmap
+                                    ? Icons.close
+                                    : Icons.visibility),
+                                label: Text(_showHeatmap
+                                    ? 'Heatmap Kapat'
+                                    : 'Heatmap Göster'),
+                              ),
+                            ),
                         ],
                       ),
                     ),
@@ -392,6 +392,8 @@ class _AnomalyDetectionPageState extends State<AnomalyDetectionPage> {
                             _resultLabel = null;
                             _resultConfidence = null;
                             _resultLatency = null;
+                            _resultHeatmap = null;
+                            _showHeatmap = false;
                           });
                         },
                         child: const Text('Yeni İşlem'),
@@ -403,7 +405,24 @@ class _AnomalyDetectionPageState extends State<AnomalyDetectionPage> {
           ),
         ],
       ),
+      // Heatmap Modal
+      floatingActionButton: _showHeatmap && _resultHeatmap != null
+          ? FloatingActionButton(
+              onPressed: () {
+                setState(() {
+                  _showHeatmap = false;
+                });
+              },
+              child: const Icon(Icons.close),
+            )
+          : null,
     );
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Heatmap gösteriliyorsa ve boyut değiştiyse, overlay'i güncelle
   }
 
   Widget _resultItem(String label, String value, IconData icon) {
