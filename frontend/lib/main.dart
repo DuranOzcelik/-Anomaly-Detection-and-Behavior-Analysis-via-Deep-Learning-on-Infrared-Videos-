@@ -1,4 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:http/http.dart' as http;
+import 'dart:io';
 
 void main() {
   runApp(const MyApp());
@@ -7,116 +10,422 @@ void main() {
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
-  // This widget is the root of your application.
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter Demo',
+      title: 'Kızılötesi Görüntü Anomali Tespiti',
       theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // TRY THIS: Try running your application with "flutter run". You'll see
-        // the application has a purple toolbar. Then, without quitting the app,
-        // try changing the seedColor in the colorScheme below to Colors.green
-        // and then invoke "hot reload" (save your changes or press the "hot
-        // reload" button in a Flutter-supported IDE, or press "r" if you used
-        // the command line to start the app).
-        //
-        // Notice that the counter didn't reset back to zero; the application
-        // state is not lost during the reload. To reset the state, use hot
-        // restart instead.
-        //
-        // This works for code too, not just values: Most code changes can be
-        // tested with just a hot reload.
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
+        useMaterial3: true,
       ),
-      home: const MyHomePage(title: 'Flutter Demo Home Page'),
+      home: const AnomalyDetectionPage(),
     );
   }
 }
 
-class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key, required this.title});
-
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
-
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
-
-  final String title;
+class AnomalyDetectionPage extends StatefulWidget {
+  const AnomalyDetectionPage({super.key});
 
   @override
-  State<MyHomePage> createState() => _MyHomePageState();
+  State<AnomalyDetectionPage> createState() => _AnomalyDetectionPageState();
 }
 
-class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
+class _AnomalyDetectionPageState extends State<AnomalyDetectionPage> {
+  String? _selectedVideoPath;
+  String? _selectedVideoName;
+  bool _isProcessing = false;
+  String? _jobId;
 
-  void _incrementCounter() {
+  // Results
+  String? _resultLabel;
+  double? _resultConfidence;
+  int? _resultLatency;
+  bool _hasResults = false;
+
+  final String _backendUrl = 'http://localhost:8000';
+
+  Future<void> _pickVideo() async {
+    FilePickerResult? result = await FilePicker.platform.pickFiles(
+      type: FileType.video,
+      allowMultiple: false,
+    );
+
+    if (result != null && result.files.single.path != null) {
+      setState(() {
+        _selectedVideoPath = result.files.single.path;
+        _selectedVideoName = result.files.single.name;
+      });
+    }
+  }
+
+  Future<void> _uploadVideo() async {
+    if (_selectedVideoPath == null) {
+      _showSnackBar('Lütfen bir video seçin', Colors.red);
+      return;
+    }
+
     setState(() {
-      // This call to setState tells the Flutter framework that something has
-      // changed in this State, which causes it to rerun the build method below
-      // so that the display can reflect the updated values. If we changed
-      // _counter without calling setState(), then the build method would not be
-      // called again, and so nothing would appear to happen.
-      _counter++;
+      _isProcessing = true;
+      _hasResults = false;
     });
+
+    try {
+      final file = File(_selectedVideoPath!);
+      final request = http.MultipartRequest(
+        'POST',
+        Uri.parse('$_backendUrl/process-video'),
+      );
+
+      request.files.add(
+        await http.MultipartFile.fromPath('file', file.path),
+      );
+
+      final response = await request.send();
+      final _ = await response.stream.bytesToString();
+
+      if (response.statusCode == 200) {
+        final jobId = 'job_${DateTime.now().millisecondsSinceEpoch}';
+
+        setState(() {
+          _jobId = jobId;
+        });
+
+        _showSnackBar('Video yüklendi! İşleniyor...', Colors.green);
+
+        // Simulate processing with mock results
+        await Future.delayed(const Duration(seconds: 2));
+        _getMockResults();
+      } else {
+        _showSnackBar('Video yüklenemedi', Colors.red);
+      }
+    } catch (e) {
+      _showSnackBar('Hata: $e', Colors.red);
+    } finally {
+      setState(() {
+        _isProcessing = false;
+      });
+    }
+  }
+
+  void _getMockResults() {
+    setState(() {
+      _hasResults = true;
+      _resultLabel = 'Normal';
+      _resultConfidence = 0.87;
+      _resultLatency = 1240; // ms
+    });
+  }
+
+  void _showSnackBar(String message, Color color) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: color,
+        duration: const Duration(seconds: 2),
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
     return Scaffold(
       appBar: AppBar(
-        // TRY THIS: Try changing the color here to a specific color (to
-        // Colors.amber, perhaps?) and trigger a hot reload to see the AppBar
-        // change color while the other colors stay the same.
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
-        title: Text(widget.title),
+        title: const Text('Kızılötesi Görüntü Anomali Tespiti'),
+        elevation: 0,
       ),
-      body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
-        child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          //
-          // TRY THIS: Invoke "debug painting" (choose the "Toggle Debug Paint"
-          // action in the IDE, or press "p" in the console), to see the
-          // wireframe for each widget.
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: <Widget>[
-            const Text('You have pushed the button this many times:'),
+      body: Row(
+        children: [
+          // Left Panel - Video Upload
+          Expanded(
+            flex: 1,
+            child: Container(
+              color: Colors.grey[100],
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Video Yükle',
+                    style: Theme.of(context).textTheme.headlineSmall,
+                  ),
+                  const SizedBox(height: 24),
+                  // Upload Area
+                  Container(
+                    decoration: BoxDecoration(
+                      border: Border.all(color: Colors.blue, width: 2),
+                      borderRadius: BorderRadius.circular(12),
+                      color: Colors.white,
+                    ),
+                    padding: const EdgeInsets.all(32),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Icon(
+                          Icons.video_library,
+                          size: 64,
+                          color: Colors.blue,
+                        ),
+                        const SizedBox(height: 16),
+                        Text(
+                          'Video Dosyası Seç',
+                          style: Theme.of(context).textTheme.titleMedium,
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          'MP4, AVI, MOV formatları desteklenir',
+                          style: Theme.of(context).textTheme.bodySmall,
+                          textAlign: TextAlign.center,
+                        ),
+                        const SizedBox(height: 16),
+                        ElevatedButton.icon(
+                          onPressed: _isProcessing ? null : _pickVideo,
+                          icon: const Icon(Icons.folder_open),
+                          label: const Text('Dosya Seç'),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 24),
+                  // Selected File Info
+                  if (_selectedVideoName != null) ...[
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Colors.green[50],
+                        border: Border.all(color: Colors.green),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Seçilen Dosya:',
+                            style: Theme.of(context).textTheme.labelSmall,
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            _selectedVideoName!,
+                            style: Theme.of(context).textTheme.bodyMedium,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                  ],
+                  // Upload Button
+                  SizedBox(
+                    width: double.infinity,
+                    height: 48,
+                    child: ElevatedButton.icon(
+                      onPressed: _isProcessing ? null : _uploadVideo,
+                      icon: _isProcessing
+                          ? const SizedBox(
+                              width: 20,
+                              height: 20,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                              ),
+                            )
+                          : const Icon(Icons.upload),
+                      label: Text(
+                        _isProcessing ? 'İşleniyor...' : 'Video İşle',
+                        style: const TextStyle(fontSize: 16),
+                      ),
+                    ),
+                  ),
+                  const Spacer(),
+                  // Info Box
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.blue[50],
+                      border: Border.all(color: Colors.blue),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Sistem Durumu:',
+                          style: Theme.of(context).textTheme.labelSmall,
+                        ),
+                        const SizedBox(height: 4),
+                        Row(
+                          children: [
+                            const CircleAvatar(
+                              radius: 4,
+                              backgroundColor: Colors.green,
+                            ),
+                            const SizedBox(width: 8),
+                            Text(
+                              'Backend Bağlı',
+                              style: Theme.of(context).textTheme.bodySmall,
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          // Right Panel - Results
+          Expanded(
+            flex: 1,
+            child: Container(
+              color: Colors.white,
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Analiz Sonuçları',
+                    style: Theme.of(context).textTheme.headlineSmall,
+                  ),
+                  const SizedBox(height: 24),
+                  if (!_hasResults)
+                    Expanded(
+                      child: Center(
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(
+                              Icons.hourglass_empty,
+                              size: 64,
+                              color: Colors.grey[400],
+                            ),
+                            const SizedBox(height: 16),
+                            Text(
+                              'Sonuç Bekleniyor',
+                              style: Theme.of(context).textTheme.titleMedium,
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              'Video yükleyip işlemeye başlayın',
+                              style: Theme.of(context).textTheme.bodySmall,
+                              textAlign: TextAlign.center,
+                            ),
+                          ],
+                        ),
+                      ),
+                    )
+                  else
+                    Expanded(
+                      child: Column(
+                        children: [
+                          // Result Card
+                          Container(
+                            padding: const EdgeInsets.all(16),
+                            decoration: BoxDecoration(
+                              color: Colors.blue[50],
+                              border: Border.all(color: Colors.blue),
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: Column(
+                              children: [
+                                _resultItem(
+                                  'Sınıf',
+                                  _resultLabel ?? 'N/A',
+                                  Icons.label,
+                                ),
+                                const SizedBox(height: 16),
+                                _resultItem(
+                                  'Güven Oranı',
+                                  _resultConfidence != null
+                                      ? '${(_resultConfidence! * 100).toStringAsFixed(1)}%'
+                                      : 'N/A',
+                                  Icons.percent,
+                                ),
+                                const SizedBox(height: 16),
+                                _resultItem(
+                                  'İşlem Süresi',
+                                  _resultLatency != null
+                                      ? '${_resultLatency}ms'
+                                      : 'N/A',
+                                  Icons.schedule,
+                                ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: 24),
+                          // Confidence Gauge
+                          if (_resultConfidence != null)
+                            Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'Güven Ölçeği',
+                                  style: Theme.of(context).textTheme.labelMedium,
+                                ),
+                                const SizedBox(height: 8),
+                                ClipRRect(
+                                  borderRadius: BorderRadius.circular(8),
+                                  child: LinearProgressIndicator(
+                                    value: _resultConfidence!,
+                                    minHeight: 12,
+                                    backgroundColor: Colors.grey[300],
+                                    valueColor: AlwaysStoppedAnimation(
+                                      _resultConfidence! > 0.7
+                                          ? Colors.green
+                                          : _resultConfidence! > 0.5
+                                              ? Colors.orange
+                                              : Colors.red,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                        ],
+                      ),
+                    ),
+                  const Spacer(),
+                  // Action Buttons
+                  if (_hasResults)
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton(
+                        onPressed: () {
+                          setState(() {
+                            _hasResults = false;
+                            _resultLabel = null;
+                            _resultConfidence = null;
+                            _resultLatency = null;
+                          });
+                        },
+                        child: const Text('Yeni İşlem'),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _resultItem(String label, String value, IconData icon) {
+    return Row(
+      children: [
+        Icon(icon, color: Colors.blue),
+        const SizedBox(width: 12),
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
             Text(
-              '$_counter',
-              style: Theme.of(context).textTheme.headlineMedium,
+              label,
+              style: Theme.of(context).textTheme.labelSmall,
+            ),
+            const SizedBox(height: 4),
+            Text(
+              value,
+              style: Theme.of(context).textTheme.titleMedium,
             ),
           ],
         ),
-      ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _incrementCounter,
-        tooltip: 'Increment',
-        child: const Icon(Icons.add),
-      ), // This trailing comma makes auto-formatting nicer for build methods.
+      ],
     );
   }
 }
