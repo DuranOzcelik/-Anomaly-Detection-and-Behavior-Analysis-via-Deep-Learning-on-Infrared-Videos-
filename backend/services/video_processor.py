@@ -11,15 +11,14 @@ from collections import Counter
 
 logger = logging.getLogger(__name__)
 
-CLIP_LENGTH = 16    # Eğitimde kullanılan klip uzunluğu (frame)
-CLIP_STEP   = 8     # Sliding window adımı (frame) — pipeline diyagramındaki değer
-CRAE_SIZE   = 128   # CR-AE giriş boyutu (eğitimde kullanılan)
-CNN3D_SIZE  = 112   # 3D-CNN giriş boyutu (eğitimde kullanılan)
-FPS_SAMPLE  = 4     # Her 4 frame'den birini al (~7-8fps efektif)
+CLIP_LENGTH = 16    # frames per clip (matches training config)
+CLIP_STEP   = 8     # sliding window step
+CRAE_SIZE   = 128   # CR-AE input resolution
+CNN3D_SIZE  = 112   # 3D-CNN input resolution
+FPS_SAMPLE  = 4     # sample every 4th frame
 
-# CR-AE cascade eşiği (raw MSE).
-# crae_results_v3.json'daki recall-90 threshold değeriyle güncelle.
-# Örnek: normal_mse_mean=0.002 ise threshold ~0.004-0.006 civarı olur.
+# CR-AE cascade threshold (raw MSE).
+# Update from crae_results_v3.json recall-90 threshold for your dataset.
 CRAE_THRESHOLD_MSE = 0.012
 
 
@@ -31,7 +30,6 @@ class VideoProcessor:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     def extract_frames(self, video_buffer: BytesIO, fps_downsample: int = FPS_SAMPLE) -> List[np.ndarray]:
-        """Her fps_downsample'ıncı frame'i alır. 2dk video @30fps → ~450 frame."""
         import tempfile, os
         video_buffer.seek(0)
         with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as tmp:
@@ -41,7 +39,7 @@ class VideoProcessor:
         frames = []
         cap = cv2.VideoCapture(tmp_path)
         if not cap.isOpened():
-            logger.error(f"❌ Video açılamadı: {tmp_path}")
+            logger.error(f"Could not open video: {tmp_path}")
             os.remove(tmp_path)
             return []
 
@@ -57,16 +55,12 @@ class VideoProcessor:
 
         cap.release()
         os.remove(tmp_path)
-        logger.info(f"✓ {len(frames)} frame çıkarıldı (toplam={frame_count}, downsample={fps_downsample}x)")
+        logger.info(f"{len(frames)} frames extracted (total={frame_count}, downsample={fps_downsample}x)")
         return frames
 
     def _build_clips(self, frames: List[np.ndarray]) -> List[List[np.ndarray]]:
-        """
-        16-frame sliding window clips oluşturur (step=8).
-        En az 16 frame yoksa eldekilerle tek klip döner.
-        """
         if len(frames) < CLIP_LENGTH:
-            return [frames]  # çok kısa video, hepsini ver
+            return [frames]
 
         clips = []
         for start in range(0, len(frames) - CLIP_LENGTH + 1, CLIP_STEP):
@@ -74,29 +68,23 @@ class VideoProcessor:
         return clips
 
     def _frames_to_crae_tensor(self, clip: List[np.ndarray]) -> torch.Tensor:
-        """
-        CR-AE giriş tensörü: (1, seq_len, 1, H, W) — grayscale, float32, [0,1]
-        Eğitimde grayscale kullanıldı (unsqueeze(1) ile tek kanal).
-        """
+        # Input shape: (1, seq_len, 1, H, W) — grayscale float32 [0,1]
         tensors = []
         for f in clip:
             resized = cv2.resize(f, (CRAE_SIZE, CRAE_SIZE))
-            gray = cv2.cvtColor(resized, cv2.COLOR_RGB2GRAY)   # (H, W)
-            t = torch.from_numpy(gray.astype(np.float32) / 255.0).unsqueeze(0)  # (1, H, W)
+            gray = cv2.cvtColor(resized, cv2.COLOR_RGB2GRAY)
+            t = torch.from_numpy(gray.astype(np.float32) / 255.0).unsqueeze(0)
             tensors.append(t)
 
-        # Pad: eğer klip CLIP_LENGTH'ten kısaysa başa tekrar et
         while len(tensors) < CLIP_LENGTH:
             tensors.insert(0, tensors[0].clone())
         tensors = tensors[:CLIP_LENGTH]
 
-        seq = torch.stack(tensors, dim=0).unsqueeze(0).to(self.device)  # (1, seq, C, H, W)
+        seq = torch.stack(tensors, dim=0).unsqueeze(0).to(self.device)
         return seq
 
     def _frames_to_cnn3d_tensor(self, clip: List[np.ndarray]) -> torch.Tensor:
-        """
-        3D-CNN giriş tensörü: (1, C, depth, H, W) — float32, [0,1]
-        """
+        # Input shape: (1, C, depth, H, W) — RGB float32 [0,1]
         tensors = []
         for f in clip:
             resized = cv2.resize(f, (CNN3D_SIZE, CNN3D_SIZE))
@@ -107,11 +95,11 @@ class VideoProcessor:
             tensors.insert(0, tensors[0].clone())
         tensors = tensors[:CLIP_LENGTH]
 
-        stacked = torch.stack(tensors, dim=1)   # (C, depth, H, W)
-        return stacked.unsqueeze(0).to(self.device)  # (1, C, depth, H, W)
+        stacked = torch.stack(tensors, dim=1)
+        return stacked.unsqueeze(0).to(self.device)
 
     def _infer_crae(self, clip: List[np.ndarray]) -> tuple:
-        """CR-AE reconstruction error → (anomaly_score [0,1], raw_mse, recon_b64, orig_b64, pixel_mse_map)."""
+        """Returns (anomaly_score [0,1], raw_mse, recon_b64, orig_b64, pixel_mse_map)."""
         if not self.cr_ae_model:
             return 0.0, 0.0, None, None, None
         try:
@@ -123,10 +111,9 @@ class VideoProcessor:
                 reconstructed = self.cr_ae_model.forward(seq)
 
             raw_mse = torch.mean((seq - reconstructed) ** 2).item()
-            # Eşikte (0.012) → %50, 2× eşikte → %100 olacak şekilde ölçekle
+            # Scale: threshold → 50%, 2x threshold → 100%
             anomaly_score = min(raw_mse / (CRAE_THRESHOLD_MSE * 2.0), 1.0)
 
-            # Per-pixel MSE map averaged over batch and time → (H, W)
             pixel_mse_map = torch.mean((seq - reconstructed) ** 2, dim=[0, 1, 2]).cpu().numpy()
 
             orig_b64 = None
@@ -146,11 +133,11 @@ class VideoProcessor:
 
             return anomaly_score, raw_mse, recon_b64, orig_b64, pixel_mse_map
         except Exception as e:
-            logger.error(f"❌ CR-AE inference hatası: {e}", exc_info=True)
+            logger.error(f"CR-AE inference error: {e}", exc_info=True)
             return 0.0, 0.0, None, None, None
 
     def _infer_cnn3d(self, clip: List[np.ndarray]) -> Dict:
-        """3D-CNN sınıflandırma → {classification, confidence, all_class_probs, top2_classes}."""
+        """Returns classification dict with probabilities."""
         class_names = ['Normal', 'Loitering', 'Trespass', 'Obj. Aband.']
         if not self.cnn_3d_model:
             default_probs = {'Normal': 0.7, 'Loitering': 0.1, 'Trespass': 0.1, 'Obj. Aband.': 0.1}
@@ -176,7 +163,7 @@ class VideoProcessor:
 
             confidence, pred_idx = torch.max(probs, dim=1)
             classification = class_names[pred_idx.item()]
-            logger.info(f"✓ 3D-CNN: {classification} ({confidence.item():.2%})")
+            logger.info(f"3D-CNN: {classification} ({confidence.item():.2%})")
             return {
                 'classification': classification,
                 'confidence': confidence.item(),
@@ -184,21 +171,19 @@ class VideoProcessor:
                 'top2_classes': [[k, v] for k, v in top2],
             }
         except Exception as e:
-            logger.error(f"❌ 3D-CNN inference hatası: {e}", exc_info=True)
+            logger.error(f"3D-CNN inference error: {e}", exc_info=True)
             return {'classification': 'Error', 'confidence': 0.0, 'all_class_probs': {}, 'top2_classes': []}
 
     def _generate_heatmap(self, frame: np.ndarray, anomaly_score: float,
                           pixel_mse_map: Optional[np.ndarray] = None) -> str:
-        """CR-AE per-pixel MSE haritasını sarı/kırmızı tonlarla frame üzerine bindirer."""
+        """Overlay CR-AE per-pixel MSE map on frame using COLORMAP_JET (blue→yellow→red)."""
         h, w = frame.shape[:2]
 
         if pixel_mse_map is not None and pixel_mse_map.max() > 1e-9:
-            # Gerçek uzamsal rekonstrüksiyon hatası
             mse_resized = cv2.resize(pixel_mse_map, (w, h))
             mse_norm = (mse_resized / mse_resized.max() * 255).clip(0, 255).astype(np.uint8)
             heatmap = cv2.GaussianBlur(mse_norm, (21, 21), 0)
         elif anomaly_score > 0.1:
-            # Yedek: Gauss dağılımlı blob
             heatmap_f = np.zeros((h, w), dtype=np.float32)
             cy, cx = h // 2, w // 2
             sigma = max(min(h, w) * anomaly_score * 0.25, 1.0)
@@ -208,14 +193,12 @@ class VideoProcessor:
         else:
             heatmap = np.zeros((h, w), dtype=np.uint8)
 
-        # COLORMAP_JET: mavi → cyan → yeşil → sarı → kırmızı (standart GradCAM paleti)
         heatmap_color = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
         frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
-        # Alfa maskeleme: düşük aktivasyon bölgelerinde orijinal frame, yüksek bölgelerde JET
+        # Alpha-blend: suppress low-activation regions to avoid blue noise
         max_val = float(heatmap.max()) if heatmap.max() > 0 else 1.0
         norm = heatmap.astype(np.float32) / max_val
-        # Eşik altını bastır (düşük aktivasyonlar mavi bulanıklık yaratmasın)
         alpha = np.clip((norm - 0.2) / 0.8, 0.0, 1.0)[:, :, np.newaxis] * 0.65
         blended = (frame_bgr * (1.0 - alpha) + heatmap_color * alpha).clip(0, 255).astype(np.uint8)
 
@@ -223,23 +206,19 @@ class VideoProcessor:
         return "data:image/jpeg;base64," + base64.b64encode(buf.tobytes()).decode()
 
     async def process_video(self, video_buffer: BytesIO, video_filename: str) -> AsyncGenerator:
-        """
-        Videoyu 16-frame sliding window kliplere böler ve her klip için
-        CR-AE + 3D-CNN inference yaparak sonuçları yield eder.
-        """
-        logger.info(f"▶ Video işleniyor: {video_filename}")
+        logger.info(f"Processing video: {video_filename}")
 
         frames = self.extract_frames(video_buffer, fps_downsample=FPS_SAMPLE)
         if not frames:
             yield {
                 'type': 'error',
                 'filename': video_filename,
-                'error_message': 'Video frame çıkarılamadı'
+                'error_message': 'No frames extracted from video'
             }
             return
 
         clips = self._build_clips(frames)
-        logger.info(f"✓ {len(clips)} klip oluşturuldu (frame={len(frames)}, klip={CLIP_LENGTH}, step={CLIP_STEP})")
+        logger.info(f"{len(clips)} clips built (frames={len(frames)}, clip_len={CLIP_LENGTH}, step={CLIP_STEP})")
 
         video_metrics = {
             'anomaly_scores': [],
@@ -250,7 +229,6 @@ class VideoProcessor:
         for clip_idx, clip in enumerate(clips):
             start_time = datetime.now()
             try:
-                # CR-AE adımı
                 crae_start = datetime.now()
                 anomaly_score, raw_mse, recon_frame_b64, orig_frame_b64, pixel_mse_map = await asyncio.to_thread(self._infer_crae, clip)
                 crae_time_ms = int((datetime.now() - crae_start).total_seconds() * 1000)
@@ -267,14 +245,14 @@ class VideoProcessor:
                     all_class_probs = cnn_result.get('all_class_probs', {})
                     top2_classes = cnn_result.get('top2_classes', [])
                     logger.info(
-                        f"✓ Klip {clip_idx}: MSE={raw_mse:.5f} > eşik={CRAE_THRESHOLD_MSE} "
-                        f"→ CNN: {cnn_result['classification']} ({cnn_result['confidence']:.2%})"
+                        f"Clip {clip_idx}: MSE={raw_mse:.5f} > threshold={CRAE_THRESHOLD_MSE} "
+                        f"-> CNN: {cnn_result['classification']} ({cnn_result['confidence']:.2%})"
                     )
                 else:
                     cnn_result = {'classification': 'Normal', 'confidence': 1.0}
                     logger.info(
-                        f"✓ Klip {clip_idx}: MSE={raw_mse:.5f} <= eşik={CRAE_THRESHOLD_MSE} "
-                        f"→ CNN atlandı, Normal"
+                        f"Clip {clip_idx}: MSE={raw_mse:.5f} <= threshold={CRAE_THRESHOLD_MSE} "
+                        f"-> CNN skipped, Normal"
                     )
 
                 classification = cnn_result['classification']
@@ -318,10 +296,9 @@ class VideoProcessor:
                 }
 
             except Exception as e:
-                logger.error(f"❌ Klip {clip_idx} işleme hatası: {e}")
+                logger.error(f"Clip {clip_idx} processing error: {e}")
                 yield {'frame_number': clip_idx * CLIP_STEP, 'error': str(e)}
 
-        # Video özet
         if video_metrics['anomaly_scores']:
             summary = self._calculate_video_summary(
                 video_filename,
@@ -385,7 +362,7 @@ class VideoProcessor:
 
             try:
                 if drive_service is None or not file_id:
-                    raise ValueError(f"Drive servisi veya file_id eksik: {filename}")
+                    raise ValueError(f"Drive service or file_id missing: {filename}")
 
                 video_buffer = drive_service.download_video(file_id, filename)
 
@@ -405,7 +382,7 @@ class VideoProcessor:
                 yield {'type': 'video_complete', 'filename': filename, 'video_index': idx}
 
             except Exception as e:
-                logger.error(f"❌ Video işleme hatası: {filename} - {e}", exc_info=True)
+                logger.error(f"Video processing error: {filename} - {e}", exc_info=True)
                 yield {'type': 'error', 'filename': filename, 'error_message': str(e)}
 
             if progress_callback:

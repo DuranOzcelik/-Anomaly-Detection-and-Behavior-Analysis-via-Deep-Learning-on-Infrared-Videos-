@@ -37,15 +37,16 @@ cnn_3d_model = None
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 app = FastAPI(
-    title="Infrared Image Anomaly Detection API",
-    description="Kızılötesi görüntü anomali tespiti sistemi",
+    title="Infrared Anomaly Detection API",
+    description="Infrared video anomaly detection system",
     version="1.0.0"
 )
 
+# Restrict CORS to localhost — this app runs locally
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=["http://127.0.0.1:8000", "http://localhost:8000"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -57,17 +58,12 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(TEMP_VIDEO_DIR, exist_ok=True)
 BASE_DIR = Path(__file__).resolve().parent
 
-# Drive'daki model dosyalarının gerçek path'leri (Drive kök dizinine göre)
 CRAE_DRIVE_PATH = "Data_Subset_Autoencoders_Anomaly_Detectors-CRAE/models/crae_winter_finetuned2.pth"
 CNN3D_DRIVE_PATH = "Data_Annotated_Subset_Object_Detectors-CNN/training_final/cnn_multilabel_final_model/best_model.pth"
 
-# Lokalde cache'leneceği path'ler (BASE_DIR'e göre)
 CRAE_LOCAL_PATH = "model_cache/crae_winter_finetuned2.pth"
 CNN3D_LOCAL_PATH = "model_cache/best_model.pth"
 
-# Drive'da izlenecek klasör yolu (kök dizinden itibaren '/' ile ayrılmış)
-# Örnek: "Kamera Kayitlari/IR_Videos"
-# Bu değeri kendi Drive klasör yolunuzla değiştirin.
 DRIVE_WATCH_FOLDER_PATH = os.getenv("DRIVE_WATCH_FOLDER_PATH", "archive/system_video_final_test")
 
 
@@ -76,30 +72,20 @@ def resolve_archive_path(relative_path: str) -> Path:
 
 
 def _extract_state_dict(checkpoint) -> dict:
-    """
-    Checkpoint dict'inden model ağırlıklarını çıkarır.
-    Desteklenen key'ler: 'model_state', 'model_state_dict', 'state_dict'
-    torch.compile prefix'i (_orig_mod.) varsa temizler.
-    """
+    # Unwrap nested checkpoint dicts; strip torch.compile _orig_mod. prefix
     sd = checkpoint
     if isinstance(sd, dict):
         for key in ('model_state', 'model_state_dict', 'state_dict'):
             if key in sd:
                 sd = sd[key]
                 break
-
-    # torch.compile() ile eğitilen modellerde '_orig_mod.' prefix'i gelir
     if isinstance(sd, dict) and any(k.startswith('_orig_mod.') for k in sd):
         sd = {k.replace('_orig_mod.', ''): v for k, v in sd.items()}
-
     return sd
 
 
 def load_model_weights(model, local_rel_path: str, drive_rel_path: str, drive_service=None) -> bool:
-    """
-    Modeli önce local cache'den yüklemeye çalışır.
-    Bulunamazsa Drive'dan indirir ve cache'e kaydeder.
-    """
+    # Try local cache first, fall back to Drive download
     local_path = resolve_archive_path(local_rel_path)
 
     if local_path.exists():
@@ -109,29 +95,29 @@ def load_model_weights(model, local_rel_path: str, drive_rel_path: str, drive_se
             result = model.load_state_dict(state_dict, strict=False)
             missing = [k for k in result.missing_keys if 'num_batches_tracked' not in k]
             if missing:
-                logger.warning(f"⚠ Eksik key'ler ({len(missing)}): {missing[:5]}...")
-            logger.info(f"✓ Model local cache'den yüklendi: {local_path}")
+                logger.warning(f"Missing keys ({len(missing)}): {missing[:5]}...")
+            logger.info(f"Model loaded from cache: {local_path}")
             return True
         except Exception as e:
-            logger.warning(f"⚠ Local cache bozuk, Drive'dan yeniden indiriliyor: {e}")
+            logger.warning(f"Cache corrupted, re-downloading from Drive: {e}")
             local_path.unlink(missing_ok=True)
 
     if drive_service is None:
-        logger.warning(f"⚠ '{local_rel_path}' bulunamadı ve Drive servisi kullanılamıyor")
+        logger.warning(f"'{local_rel_path}' not found and Drive service unavailable")
         return False
 
     try:
-        logger.info(f"⏳ Drive'dan indiriliyor: {drive_rel_path}")
+        logger.info(f"Downloading from Drive: {drive_rel_path}")
         weights_buffer = drive_service.download_file_by_path(drive_rel_path)
 
         if weights_buffer is None or weights_buffer.getbuffer().nbytes == 0:
-            logger.error(f"✗ Drive'dan boş dosya geldi: {drive_rel_path}")
+            logger.error(f"Empty file received from Drive: {drive_rel_path}")
             return False
 
         local_path.parent.mkdir(parents=True, exist_ok=True)
         with open(local_path, "wb") as f:
             f.write(weights_buffer.getvalue())
-        logger.info(f"✓ Drive'dan indirildi ve cache'e kaydedildi: {local_path}")
+        logger.info(f"Downloaded and cached: {local_path}")
 
         weights_buffer.seek(0)
         checkpoint = torch.load(weights_buffer, map_location=device, weights_only=False)
@@ -139,15 +125,15 @@ def load_model_weights(model, local_rel_path: str, drive_rel_path: str, drive_se
         result = model.load_state_dict(state_dict, strict=False)
         missing = [k for k in result.missing_keys if 'num_batches_tracked' not in k]
         if missing:
-            logger.warning(f"⚠ Eksik key'ler ({len(missing)}): {missing[:5]}...")
-        logger.info(f"✓ Model ağırlıkları yüklendi: {drive_rel_path}")
+            logger.warning(f"Missing keys ({len(missing)}): {missing[:5]}...")
+        logger.info(f"Model weights loaded: {drive_rel_path}")
         return True
 
     except FileNotFoundError as e:
-        logger.error(f"✗ Drive'da dosya bulunamadı: {drive_rel_path} — {e}")
+        logger.error(f"File not found on Drive: {drive_rel_path} — {e}")
         return False
     except Exception as err:
-        logger.error(f"✗ Drive'dan model indirilemedi: {drive_rel_path} — {err}", exc_info=True)
+        logger.error(f"Failed to download model from Drive: {drive_rel_path} — {err}", exc_info=True)
         return False
 
 
@@ -157,24 +143,23 @@ async def startup_event():
 
     try:
         logger.info("=" * 60)
-        logger.info("MODEL YÜKLEMESİ BAŞLIYOR")
-        logger.info(f"Cihaz: {device}")
+        logger.info("LOADING MODELS")
+        logger.info(f"Device: {device}")
         logger.info("=" * 60)
 
         drive_service = None
         if DRIVE_AVAILABLE:
             try:
                 drive_service = get_drive_service()
-                logger.info("✓ Google Drive servisi başlatıldı")
+                logger.info("Google Drive service initialized")
             except Exception as drive_err:
-                logger.warning(f"⚠ Google Drive servisi başlatılamadı: {drive_err}")
+                logger.warning(f"Google Drive service unavailable: {drive_err}")
                 drive_service = None
         else:
-            logger.warning("⚠ Google Drive kütüphanesi kurulu değil")
+            logger.warning("Google Drive library not installed")
 
-        # CR-AE Model
         try:
-            logger.info("⏳ CR-AE modeli yükleniyor...")
+            logger.info("Loading CR-AE model...")
             cr_ae_model = ConvolutionalRecurrentAutoencoder()
             loaded = load_model_weights(
                 cr_ae_model,
@@ -183,17 +168,16 @@ async def startup_event():
                 drive_service=drive_service,
             )
             if not loaded:
-                logger.warning("⚠ CR-AE ağırlıkları yüklenemedi → eğitimsiz model kullanılacak")
+                logger.warning("CR-AE weights not loaded — using untrained model")
             cr_ae_model.to(device)
             cr_ae_model.eval()
-            logger.info(f"✓ CR-AE modeli hazır ({device})")
+            logger.info(f"CR-AE model ready ({device})")
         except Exception as model_err:
-            logger.error(f"✗ CR-AE modeli yüklenirken hata: {model_err}", exc_info=True)
+            logger.error(f"CR-AE model load error: {model_err}", exc_info=True)
             cr_ae_model = None
 
-        # CNN 3D Model
         try:
-            logger.info("⏳ 3D-CNN modeli yükleniyor...")
+            logger.info("Loading 3D-CNN model...")
             cnn_3d_model = CNN3D(num_classes=4, dropout=0.5)
             loaded = load_model_weights(
                 cnn_3d_model,
@@ -202,26 +186,26 @@ async def startup_event():
                 drive_service=drive_service,
             )
             if not loaded:
-                logger.warning("⚠ 3D-CNN ağırlıkları yüklenemedi → eğitimsiz model kullanılacak")
+                logger.warning("3D-CNN weights not loaded — using untrained model")
             cnn_3d_model.to(device)
             cnn_3d_model.eval()
-            logger.info(f"✓ 3D-CNN modeli hazır ({device})")
+            logger.info(f"3D-CNN model ready ({device})")
         except Exception as model_err:
-            logger.error(f"✗ 3D-CNN modeli yüklenirken hata: {model_err}", exc_info=True)
+            logger.error(f"3D-CNN model load error: {model_err}", exc_info=True)
             cnn_3d_model = None
 
         if cr_ae_model is not None and cnn_3d_model is not None:
             logger.info("=" * 60)
-            logger.info("✓ TÜM MODELLER BAŞARIYLA YÜKLENDİ")
+            logger.info("ALL MODELS LOADED SUCCESSFULLY")
             logger.info("=" * 60)
         else:
             logger.warning("=" * 60)
-            logger.warning("⚠ UYARI: Bazı modeller yüklenemedi (eğitimsiz model ile devam ediliyor)")
+            logger.warning("WARNING: Some models failed to load — running with untrained weights")
             logger.warning("=" * 60)
 
     except Exception as e:
         logger.error("=" * 60)
-        logger.error(f"✗ BAŞLANGIÇ HATASI: {e}", exc_info=True)
+        logger.error(f"STARTUP ERROR: {e}", exc_info=True)
         logger.error("=" * 60)
 
 
@@ -250,16 +234,16 @@ def image_to_base64(img):
 
 @app.get("/")
 async def root():
-    return {"message": "Kızılötesi Görüntü Anomali Tespiti API"}
+    return {"message": "Infrared Anomaly Detection API"}
 
 
 @app.get("/video/{filename:path}")
 async def serve_video(filename: str):
-    """Geçici olarak cache'lenmiş videoyu HTTP üzerinden servis eder (Flutter video_player için)."""
+    """Serve a cached video file over HTTP for the Flutter video player."""
     safe_name = Path(filename).name
     file_path = Path(TEMP_VIDEO_DIR) / safe_name
     if not file_path.exists():
-        raise HTTPException(status_code=404, detail=f"Video bulunamadı: {safe_name}")
+        raise HTTPException(status_code=404, detail=f"Video not found: {safe_name}")
     return FileResponse(
         str(file_path),
         media_type="video/mp4",
@@ -280,38 +264,33 @@ async def health_check():
 
 @app.get("/videos")
 async def list_videos(start_date: str, end_date: str):
-    """
-    Belirtilen tarih aralığındaki Drive videolarını listeler.
-    Flutter'daki listVideos() çağrısına karşılık gelen endpoint.
-    """
     if not DRIVE_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Google Drive kütüphanesi kurulu değil")
+        raise HTTPException(status_code=503, detail="Google Drive library not installed")
 
     try:
         drive_service = get_drive_service()
     except Exception as e:
-        raise HTTPException(status_code=503, detail=f"Drive bağlantısı kurulamadı: {e}")
+        raise HTTPException(status_code=503, detail=f"Drive connection failed: {e}")
 
     try:
         videos = drive_service.list_videos_by_date_range(start_date, end_date)
-        logger.info(f"✓ /videos endpoint: {len(videos)} video listelendi ({start_date} → {end_date})")
+        logger.info(f"/videos: {len(videos)} videos listed ({start_date} -> {end_date})")
         return videos
     except Exception as e:
-        logger.error(f"✗ Video listeleme hatası: {e}", exc_info=True)
+        logger.error(f"Video listing error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/drive/videos")
 async def list_drive_folder_videos():
-    """DRIVE_WATCH_FOLDER_PATH klasöründeki videoları listeler (Flutter Drive seçim dialogu için)."""
     if not DRIVE_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Google Drive kütüphanesi kurulu değil")
+        raise HTTPException(status_code=503, detail="Google Drive library not installed")
     if not DRIVE_WATCH_FOLDER_PATH:
-        raise HTTPException(status_code=400, detail="DRIVE_WATCH_FOLDER_PATH ayarlanmamış")
+        raise HTTPException(status_code=400, detail="DRIVE_WATCH_FOLDER_PATH not configured")
     try:
         drive_service = await asyncio.to_thread(get_drive_service)
     except Exception as e:
-        raise HTTPException(status_code=503, detail=f"Drive bağlantısı kurulamadı: {e}")
+        raise HTTPException(status_code=503, detail=f"Drive connection failed: {e}")
     try:
         folder_id = await asyncio.to_thread(
             drive_service.find_folder_by_path, DRIVE_WATCH_FOLDER_PATH
@@ -319,7 +298,7 @@ async def list_drive_folder_videos():
         if not folder_id:
             raise HTTPException(
                 status_code=404,
-                detail=f'Klasör bulunamadı: "{DRIVE_WATCH_FOLDER_PATH}"'
+                detail=f'Folder not found: "{DRIVE_WATCH_FOLDER_PATH}"'
             )
 
         VIDEO_MIME = (
@@ -337,14 +316,12 @@ async def list_drive_folder_videos():
 
         all_videos = []
 
-        # Doğrudan video çocukları
         direct_q = f"'{folder_id}' in parents and trashed=false and ({VIDEO_MIME})"
         direct = await asyncio.to_thread(
             drive_service._list_files, direct_q, 'files(id, name, size, mimeType)', 200
         )
         all_videos.extend(_build_video_entry(f) for f in direct)
 
-        # Alt klasörler → her birindeki videolar
         sf_q = (
             f"'{folder_id}' in parents and trashed=false and "
             "mimeType='application/vnd.google-apps.folder'"
@@ -364,7 +341,7 @@ async def list_drive_folder_videos():
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Drive video listesi hatası: {e}", exc_info=True)
+        logger.error(f"Drive video list error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -372,7 +349,7 @@ async def list_drive_folder_videos():
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     client_id = id(websocket)
-    logger.info(f"📡 WebSocket istemcisi bağlandı [ID: {client_id}]")
+    logger.info(f"WebSocket client connected [ID: {client_id}]")
 
     try:
         while True:
@@ -382,54 +359,49 @@ async def websocket_endpoint(websocket: WebSocket):
             if message.get('action') == 'start_analysis':
                 start_date = message.get('start_date')
                 end_date = message.get('end_date')
-                logger.info(f"🔍 Analiz başlatılıyor [ID: {client_id}]: {start_date} → {end_date}")
+                logger.info(f"Analysis started [ID: {client_id}]: {start_date} -> {end_date}")
 
                 try:
                     if not DRIVE_AVAILABLE:
-                        logger.error(f"❌ Google Drive kütüphanesi yüklü değil [ID: {client_id}]")
                         await websocket.send_json({
                             "type": "error",
-                            "error_message": "Google Drive kütüphanesi yüklü değil."
+                            "error_message": "Google Drive library not installed."
                         })
                         continue
 
                     try:
                         drive_service = get_drive_service()
-                        logger.info(f"✓ Drive servisi başlatıldı [ID: {client_id}]")
+                        logger.info(f"Drive service ready [ID: {client_id}]")
                     except Exception as drive_err:
-                        logger.error(f"❌ Drive doğrulaması başarısız [ID: {client_id}]: {drive_err}", exc_info=True)
+                        logger.error(f"Drive authentication failed [ID: {client_id}]: {drive_err}", exc_info=True)
                         await websocket.send_json({
                             "type": "error",
-                            "error_message": f"Google Drive bağlantısı kurulamadı: {drive_err}"
+                            "error_message": f"Google Drive connection failed: {drive_err}"
                         })
                         continue
 
                     if drive_service is None or drive_service.service is None:
-                        logger.error(f"❌ Drive servisi None döndü [ID: {client_id}]")
                         await websocket.send_json({
                             "type": "error",
-                            "error_message": "Google Drive servisi başlatılamadı."
+                            "error_message": "Google Drive service could not be initialized."
                         })
                         continue
 
                     processor = get_video_processor(cr_ae_model, cnn_3d_model)
-                    logger.info(f"✓ Video işlemcisi hazırlandı [ID: {client_id}]")
-
                     videos = drive_service.list_videos_by_date_range(start_date, end_date)
-                    logger.info(f"📹 {len(videos)} video bulundu [ID: {client_id}]")
+                    logger.info(f"{len(videos)} videos found [ID: {client_id}]")
 
                     if not videos:
-                        logger.warning(f"⚠ Tarih aralığında video bulunamadı [ID: {client_id}]: {start_date} - {end_date}")
                         await websocket.send_json({
                             "type": "error",
-                            "error_message": f"{start_date} - {end_date} aralığında video bulunamadı."
+                            "error_message": f"No videos found for {start_date} - {end_date}."
                         })
                         continue
 
                     batch_start_time = datetime.now()
 
                     for idx, video in enumerate(videos, 1):
-                        logger.info(f"▶ Video işleniyor [{idx}/{len(videos)}] [ID: {client_id}]: {video['filename']}")
+                        logger.info(f"Processing [{idx}/{len(videos)}] [ID: {client_id}]: {video['filename']}")
                         await websocket.send_json({
                             "type": "video_start",
                             "filename": video['filename'],
@@ -441,9 +413,7 @@ async def websocket_endpoint(websocket: WebSocket):
                                 video['file_id'],
                                 video['filename']
                             )
-                            logger.info(f"✓ Video indirildi [ID: {client_id}]: {video['filename']}")
 
-                            # Videoyu temp'e kaydet ve Flutter'a URL gönder
                             safe_name = Path(video['filename']).name
                             temp_path = Path(TEMP_VIDEO_DIR) / safe_name
                             video_buffer.seek(0)
@@ -462,7 +432,6 @@ async def websocket_endpoint(websocket: WebSocket):
                                 video['filename']
                             ):
                                 if frame_result.get('type') == 'video_summary':
-                                    logger.info(f"✓ Video summary gönderiliyor [ID: {client_id}]: {frame_result.get('filename')}")
                                     await websocket.send_json(frame_result)
                                 else:
                                     frame_count += 1
@@ -472,14 +441,14 @@ async def websocket_endpoint(websocket: WebSocket):
                                             **frame_result
                                         })
 
-                            logger.info(f"✓ Video tamamlandı [ID: {client_id}]: {video['filename']} ({frame_count} sample frame)")
+                            logger.info(f"Video complete [ID: {client_id}]: {video['filename']} ({frame_count} clips)")
                             await websocket.send_json({
                                 "type": "video_complete",
                                 "filename": video['filename']
                             })
 
                         except Exception as e:
-                            logger.error(f"❌ Video işleme hatası [ID: {client_id}]: {video['filename']} - {e}", exc_info=True)
+                            logger.error(f"Video processing error [ID: {client_id}]: {video['filename']} - {e}", exc_info=True)
                             await websocket.send_json({
                                 "type": "error",
                                 "filename": video['filename'],
@@ -487,7 +456,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             })
 
                     processing_time = int((datetime.now() - batch_start_time).total_seconds())
-                    logger.info(f"✓ Batch tamamlandı [ID: {client_id}]: {len(videos)} video işlendi ({processing_time}s)")
+                    logger.info(f"Batch complete [ID: {client_id}]: {len(videos)} videos ({processing_time}s)")
                     await websocket.send_json({
                         "type": "batch_complete",
                         "total_videos": len(videos),
@@ -495,34 +464,32 @@ async def websocket_endpoint(websocket: WebSocket):
                     })
 
                 except Exception as e:
-                    logger.error(f"❌ WebSocket analiz hatası [ID: {client_id}]: {e}", exc_info=True)
+                    logger.error(f"WebSocket analysis error [ID: {client_id}]: {e}", exc_info=True)
                     await websocket.send_json({
                         "type": "error",
                         "error_message": str(e)
                     })
 
             elif message.get('action') == 'start_video':
-                # Tek video işleme (Flutter'daki startVideoProcessing)
                 filename = message.get('filename')
-                logger.info(f"🔁 Tek video işleme talebi [ID: {client_id}]: {filename}")
+                logger.info(f"Single video request [ID: {client_id}]: {filename}")
 
                 try:
                     if not DRIVE_AVAILABLE:
                         await websocket.send_json({
                             "type": "error",
-                            "error_message": "Google Drive kütüphanesi yüklü değil."
+                            "error_message": "Google Drive library not installed."
                         })
                         continue
 
                     drive_service = get_drive_service()
                     processor = get_video_processor(cr_ae_model, cnn_3d_model)
 
-                    # Dosyayı Drive'da ara
                     file_id = drive_service.find_file_by_path(filename)
                     if not file_id:
                         await websocket.send_json({
                             "type": "error",
-                            "error_message": f"Video bulunamadı: {filename}"
+                            "error_message": f"Video not found: {filename}"
                         })
                         continue
 
@@ -533,7 +500,6 @@ async def websocket_endpoint(websocket: WebSocket):
 
                     video_buffer = drive_service.download_video(file_id, filename)
 
-                    # Videoyu temp'e kaydet ve Flutter'a URL gönder
                     safe_name = Path(filename).name
                     temp_path = Path(TEMP_VIDEO_DIR) / safe_name
                     video_buffer.seek(0)
@@ -562,20 +528,20 @@ async def websocket_endpoint(websocket: WebSocket):
                     })
 
                 except Exception as e:
-                    logger.error(f"❌ Tek video işleme hatası [ID: {client_id}]: {filename} - {e}", exc_info=True)
+                    logger.error(f"Single video error [ID: {client_id}]: {filename} - {e}", exc_info=True)
                     await websocket.send_json({
                         "type": "error",
                         "error_message": str(e)
                     })
 
             elif message.get('action') == 'stop':
-                logger.info(f"⏹ Analiz durduruldu [ID: {client_id}]")
+                logger.info(f"Analysis stopped [ID: {client_id}]")
                 await websocket.send_json({"type": "stopped"})
 
     except WebSocketDisconnect:
-        logger.info(f"📡 WebSocket istemcisi bağlantısı kesildi [ID: {client_id}]")
+        logger.info(f"WebSocket client disconnected [ID: {client_id}]")
     except Exception as e:
-        logger.error(f"❌ WebSocket hatası [ID: {client_id}]: {e}", exc_info=True)
+        logger.error(f"WebSocket error [ID: {client_id}]: {e}", exc_info=True)
         try:
             await websocket.send_json({
                 "type": "error",
@@ -587,47 +553,44 @@ async def websocket_endpoint(websocket: WebSocket):
 
 @app.websocket("/ws/drive")
 async def drive_websocket_endpoint(websocket: WebSocket):
-    """Google Drive klasörünü izleme ve gerçek zamanlı video işleme WebSocket."""
     await websocket.accept()
     client_id  = id(websocket)
     stop_event = asyncio.Event()
-    logger.info(f"☁️ Drive WebSocket bağlandı [ID: {client_id}]")
+    logger.info(f"Drive WebSocket connected [ID: {client_id}]")
 
     if not DRIVE_AVAILABLE:
         await websocket.send_json({
             'type': 'error',
-            'error_message': 'Google Drive kütüphanesi kurulu değil. pip install google-api-python-client google-auth'
+            'error_message': 'Google Drive library not installed. Run: pip install google-api-python-client google-auth'
         })
         return
 
     if not DRIVE_WATCH_FOLDER_PATH:
         await websocket.send_json({
             'type': 'error',
-            'error_message': 'DRIVE_WATCH_FOLDER_PATH ayarlanmamış. main.py içindeki sabiti veya DRIVE_WATCH_FOLDER_PATH env değişkenini ayarlayın.'
+            'error_message': 'DRIVE_WATCH_FOLDER_PATH not configured. Set it in .env or in main.py.'
         })
         return
 
-    # İlk mesajı bekle (start_drive_watch komutu)
     try:
         raw = await asyncio.wait_for(websocket.receive_text(), timeout=10.0)
         init_msg = json.loads(raw)
         if init_msg.get('action') != 'start_drive_watch':
             await websocket.send_json({
                 'type': 'error',
-                'error_message': 'start_drive_watch komutu beklendi'
+                'error_message': 'Expected start_drive_watch command'
             })
             return
     except asyncio.TimeoutError:
         await websocket.send_json({
             'type': 'error',
-            'error_message': 'start_drive_watch komutu beklendi (timeout)'
+            'error_message': 'Timeout waiting for start_drive_watch command'
         })
         return
     except Exception as exc:
         await websocket.send_json({'type': 'error', 'error_message': str(exc)})
         return
 
-    # Tek video modu için opsiyonel filtreler
     file_id_filter  = init_msg.get('file_id')
     filename_filter = init_msg.get('filename')
 
@@ -636,12 +599,11 @@ async def drive_websocket_endpoint(websocket: WebSocket):
     except Exception as e:
         await websocket.send_json({
             'type': 'error',
-            'error_message': f'Drive bağlantısı kurulamadı: {e}'
+            'error_message': f'Drive connection failed: {e}'
         })
         return
 
-    # Klasör yolunu Drive'da çöz → folder_id bul
-    logger.info(f"☁️ Drive klasörü çözülüyor [ID: {client_id}]: {DRIVE_WATCH_FOLDER_PATH}")
+    logger.info(f"Resolving Drive folder [ID: {client_id}]: {DRIVE_WATCH_FOLDER_PATH}")
     try:
         folder_id = await asyncio.to_thread(
             drive_service.find_folder_by_path, DRIVE_WATCH_FOLDER_PATH
@@ -649,18 +611,18 @@ async def drive_websocket_endpoint(websocket: WebSocket):
     except Exception as e:
         await websocket.send_json({
             'type': 'error',
-            'error_message': f'Drive klasörü bulunamadı: {e}'
+            'error_message': f'Drive folder lookup failed: {e}'
         })
         return
 
     if not folder_id:
         await websocket.send_json({
             'type': 'error',
-            'error_message': f'Drive klasörü bulunamadı: "{DRIVE_WATCH_FOLDER_PATH}" — yol doğru mu?'
+            'error_message': f'Drive folder not found: "{DRIVE_WATCH_FOLDER_PATH}"'
         })
         return
 
-    logger.info(f"☁️ Drive klasörü bulundu [ID: {client_id}]: {folder_id}")
+    logger.info(f"Drive folder found [ID: {client_id}]: {folder_id}")
 
     from services.drive_watcher import DriveWatcher
     processor = get_video_processor(cr_ae_model, cnn_3d_model)
@@ -672,7 +634,7 @@ async def drive_websocket_endpoint(websocket: WebSocket):
                 raw2 = await websocket.receive_text()
                 msg2 = json.loads(raw2)
                 if msg2.get('action') == 'stop_drive_watch':
-                    logger.info(f"⏹ stop_drive_watch alındı [ID: {client_id}]")
+                    logger.info(f"Stop signal received [ID: {client_id}]")
                     stop_event.set()
                     break
         except (WebSocketDisconnect, Exception):
@@ -689,7 +651,7 @@ async def drive_websocket_endpoint(websocket: WebSocket):
     except WebSocketDisconnect:
         pass
     except Exception as exc:
-        logger.error(f"Drive WebSocket hatası: {exc}", exc_info=True)
+        logger.error(f"Drive WebSocket error: {exc}", exc_info=True)
         try:
             await websocket.send_json({'type': 'error', 'error_message': str(exc)})
         except Exception:
@@ -697,44 +659,41 @@ async def drive_websocket_endpoint(websocket: WebSocket):
     finally:
         stop_event.set()
         stop_task.cancel()
-        logger.info(f"☁️ Drive WebSocket kapandı [ID: {client_id}]")
+        logger.info(f"Drive WebSocket closed [ID: {client_id}]")
 
 
 @app.websocket("/ws/camera")
 async def camera_websocket_endpoint(websocket: WebSocket):
-    """Gerçek zamanlı IR kamera akışı ve anomali analizi WebSocket."""
     await websocket.accept()
     client_id  = id(websocket)
     stop_event = asyncio.Event()
-    logger.info(f"📸 Kamera WebSocket bağlandı [ID: {client_id}]")
+    logger.info(f"Camera WebSocket connected [ID: {client_id}]")
 
     from services.camera_processor import CameraProcessor
 
-    processor    = get_video_processor(cr_ae_model, cnn_3d_model)
-    camera_proc  = CameraProcessor(processor)
+    processor   = get_video_processor(cr_ae_model, cnn_3d_model)
+    camera_proc = CameraProcessor(processor)
 
-    # İlk mesajı bekle (start_camera komutu)
     try:
         raw = await asyncio.wait_for(websocket.receive_text(), timeout=10.0)
         init_msg = json.loads(raw)
         if init_msg.get('action') == 'start_camera':
             camera_proc.camera_index = int(init_msg.get('camera_index', 0))
-            logger.info(f"📸 Kamera {camera_proc.camera_index} başlatılıyor [ID: {client_id}]")
+            logger.info(f"Starting camera {camera_proc.camera_index} [ID: {client_id}]")
     except asyncio.TimeoutError:
-        await websocket.send_json({'type': 'error', 'error_message': 'start_camera komutu beklendi (timeout)'})
+        await websocket.send_json({'type': 'error', 'error_message': 'Timeout waiting for start_camera command'})
         return
     except Exception as exc:
         await websocket.send_json({'type': 'error', 'error_message': str(exc)})
         return
 
-    # Arka planda stop komutunu dinle
     async def _listen_stop():
         try:
             while True:
                 raw2 = await websocket.receive_text()
                 msg2 = json.loads(raw2)
                 if msg2.get('action') == 'stop_camera':
-                    logger.info(f"⏹ stop_camera alındı [ID: {client_id}]")
+                    logger.info(f"Stop camera signal received [ID: {client_id}]")
                     stop_event.set()
                     break
         except (WebSocketDisconnect, Exception):
@@ -751,7 +710,7 @@ async def camera_websocket_endpoint(websocket: WebSocket):
     except WebSocketDisconnect:
         pass
     except Exception as exc:
-        logger.error(f"Kamera WebSocket hatası: {exc}", exc_info=True)
+        logger.error(f"Camera WebSocket error: {exc}", exc_info=True)
         try:
             await websocket.send_json({'type': 'error', 'error_message': str(exc)})
         except Exception:
@@ -759,44 +718,40 @@ async def camera_websocket_endpoint(websocket: WebSocket):
     finally:
         stop_event.set()
         stop_task.cancel()
-        logger.info(f"📸 Kamera WebSocket kapandı [ID: {client_id}]")
+        logger.info(f"Camera WebSocket closed [ID: {client_id}]")
 
 
 @app.post("/process-video")
 async def process_video(file: UploadFile = File(...)):
-    logger.info(f"📤 Video yükleniyor: {file.filename}")
+    logger.info(f"Video upload: {file.filename}")
 
     try:
         if not file.filename.endswith(('.mp4', '.avi', '.mov', '.mkv')):
-            logger.error(f"❌ Desteklenmeyen format: {file.filename}")
-            raise HTTPException(status_code=400, detail="Desteklenen format: MP4, AVI, MOV, MKV")
+            raise HTTPException(status_code=400, detail="Supported formats: MP4, AVI, MOV, MKV")
 
         file_path = os.path.join(UPLOAD_DIR, file.filename)
         with open(file_path, "wb") as buffer:
             contents = await file.read()
             buffer.write(contents)
-        logger.info(f"✓ Video kaydedildi: {file_path}")
 
         job_id = f"job_{int(datetime.now().timestamp() * 1000)}"
         processing_status[job_id] = {
-            "status": "Tamamlandı",
+            "status": "completed",
             "filename": file.filename,
             "created_at": datetime.now().isoformat(),
             "progress": 100,
             "classification": "Normal",
             "confidence": 0.87
         }
-        logger.info(f"✓ İşlem başlatıldı [Job ID: {job_id}]: {file.filename}")
 
         heatmap_img = generate_heatmap(640, 480)
         heatmap_base64 = image_to_base64(heatmap_img)
-        logger.info(f"✓ Heatmap oluşturuldu [Job ID: {job_id}]")
 
         return {
             "job_id": job_id,
-            "message": "Video işlendi",
+            "message": "Video processed",
             "filename": file.filename,
-            "status": "Tamamlandı",
+            "status": "completed",
             "classification": "Normal",
             "confidence": 0.87,
             "latency_ms": 1240,
@@ -806,14 +761,14 @@ async def process_video(file: UploadFile = File(...)):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Video işleme başarısız: {file.filename} - {e}", exc_info=True)
+        logger.error(f"Video processing failed: {file.filename} - {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/results/{job_id}")
 async def get_results(job_id: str):
     if job_id not in processing_status:
-        raise HTTPException(status_code=404, detail="İşlem bulunamadı")
+        raise HTTPException(status_code=404, detail="Job not found")
     job_info = processing_status[job_id]
     return {
         "job_id": job_id,

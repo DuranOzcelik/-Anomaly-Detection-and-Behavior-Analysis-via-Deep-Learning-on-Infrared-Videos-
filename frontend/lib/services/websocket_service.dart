@@ -182,21 +182,21 @@ class WebSocketService {
           _messageController.add(
             ProcessingMessage(
               type: 'error',
-              errorMessage: 'WebSocket hatası: $error',
+              errorMessage: 'WebSocket error: $error',
             ),
           );
         },
         onDone: () {
           _isConnected = false;
-          developer.log('WebSocket bağlantısı kapatıldı');
+          developer.log('WebSocket connection closed');
         },
       );
     } on TimeoutException {
       _isConnected = false;
-      throw Exception('WebSocket bağlantı zaman aşımı: Backend erişilemiyor ($_baseUrl)');
+      throw Exception('WebSocket connection timed out: backend unreachable ($_baseUrl)');
     } catch (e) {
       _isConnected = false;
-      throw Exception('WebSocket bağlantı hatası: $e');
+      throw Exception('WebSocket connection error: $e');
     }
   }
 
@@ -206,14 +206,14 @@ class WebSocketService {
       _messageController.add(ProcessingMessage.fromJson(data));
     } catch (e) {
       _messageController.add(
-        ProcessingMessage(type: 'error', errorMessage: 'Mesaj ayrıştırılamadı: $e'),
+        ProcessingMessage(type: 'error', errorMessage: 'Failed to parse message: $e'),
       );
     }
   }
 
   Future<void> startAnalysis({required String startDate, required String endDate}) async {
     if (!_isConnected || _channel == null) {
-      throw Exception('WebSocket bağlı değil');
+      throw Exception('WebSocket not connected');
     }
     _channel!.sink.add(jsonEncode({
       'action': 'start_analysis',
@@ -224,7 +224,7 @@ class WebSocketService {
 
   Future<void> startVideoProcessing({required String filename}) async {
     if (!_isConnected || _channel == null) {
-      throw Exception('WebSocket bağlı değil');
+      throw Exception('WebSocket not connected');
     }
     _channel!.sink.add(jsonEncode({'action': 'start_video', 'filename': filename}));
   }
@@ -236,7 +236,7 @@ class WebSocketService {
 
   Future<void> startDriveWatch({String? fileId, String? filename}) async {
     if (!_isConnected || _channel == null) {
-      throw Exception('Drive WebSocket bağlı değil');
+      throw Exception('Drive WebSocket not connected');
     }
     final msg = <String, dynamic>{'action': 'start_drive_watch'};
     if (fileId != null)   msg['file_id']  = fileId;
@@ -251,7 +251,7 @@ class WebSocketService {
 
   Future<void> startCamera({int cameraIndex = 0}) async {
     if (!_isConnected || _channel == null) {
-      throw Exception('Kamera WebSocket bağlı değil');
+      throw Exception('Camera WebSocket not connected');
     }
     _channel!.sink.add(jsonEncode({
       'action': 'start_camera',

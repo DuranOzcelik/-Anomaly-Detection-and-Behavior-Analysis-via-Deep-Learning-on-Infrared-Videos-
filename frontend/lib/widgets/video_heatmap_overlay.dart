@@ -30,7 +30,6 @@ class _VideoHeatmapOverlayState extends State<VideoHeatmapOverlay> {
   Widget build(BuildContext context) {
     return Stack(
       children: [
-        // Heatmap görüntü
         Center(
           child: Opacity(
             opacity: _opacityValue,
@@ -46,7 +45,6 @@ class _VideoHeatmapOverlayState extends State<VideoHeatmapOverlay> {
             ),
           ),
         ),
-        // Opacity kontrolü
         Positioned(
           bottom: 16,
           left: 16,
@@ -54,7 +52,7 @@ class _VideoHeatmapOverlayState extends State<VideoHeatmapOverlay> {
           child: Container(
             padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
-              color: Colors.black.withOpacity(0.7),
+              color: Colors.black.withValues(alpha: 0.7),
               borderRadius: BorderRadius.circular(8),
             ),
             child: Column(
@@ -64,16 +62,18 @@ class _VideoHeatmapOverlayState extends State<VideoHeatmapOverlay> {
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
                     Text(
-                      'Heatmap Opaklığı',
-                      style: Theme.of(
-                        context,
-                      ).textTheme.labelSmall?.copyWith(color: Colors.white),
+                      'Heatmap Opacity',
+                      style: Theme.of(context)
+                          .textTheme
+                          .labelSmall
+                          ?.copyWith(color: Colors.white),
                     ),
                     Text(
                       '${(_opacityValue * 100).toStringAsFixed(0)}%',
-                      style: Theme.of(
-                        context,
-                      ).textTheme.labelSmall?.copyWith(color: Colors.white),
+                      style: Theme.of(context)
+                          .textTheme
+                          .labelSmall
+                          ?.copyWith(color: Colors.white),
                     ),
                   ],
                 ),
@@ -94,21 +94,21 @@ class _VideoHeatmapOverlayState extends State<VideoHeatmapOverlay> {
             ),
           ),
         ),
-        // Dosya adı
         Positioned(
           top: 16,
           left: 16,
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             decoration: BoxDecoration(
-              color: Colors.black.withOpacity(0.7),
+              color: Colors.black.withValues(alpha: 0.7),
               borderRadius: BorderRadius.circular(8),
             ),
             child: Text(
               widget.filename,
-              style: Theme.of(
-                context,
-              ).textTheme.labelSmall?.copyWith(color: Colors.white),
+              style: Theme.of(context)
+                  .textTheme
+                  .labelSmall
+                  ?.copyWith(color: Colors.white),
               overflow: TextOverflow.ellipsis,
               maxLines: 1,
             ),

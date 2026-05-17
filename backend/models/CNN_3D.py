@@ -5,16 +5,12 @@ from torchvision.models.video import r3d_18
 
 class CNN3D(nn.Module):
     """
-    3D CNN — torchvision r3d_18 bazlı, eğitim koduyla birebir aynı mimari.
+    3D CNN based on torchvision r3d_18.
 
-    Giriş : (batch, 3, 16, 112, 112)  — RGB, [0, 1]
-    Çıkış : (batch, 4) logit
+    Input : (batch, 3, 16, 112, 112)  — RGB, [0, 1]
+    Output: (batch, 4) logits
 
-    Eğitim sınıf sırası:
-        0: normal
-        1: trespassing
-        2: loitering
-        3: object_abandonment
+    Class order: 0=normal, 1=trespassing, 2=loitering, 3=object_abandonment
     """
 
     class_names = ['normal', 'trespassing', 'loitering', 'object_abandonment']
@@ -22,15 +18,15 @@ class CNN3D(nn.Module):
     def __init__(self, num_classes: int = 4, dropout: float = 0.5, **kwargs):
         super().__init__()
         base = r3d_18(weights=None)
-        in_features = base.fc.in_features   # 512
+        in_features = base.fc.in_features  # 512
 
-        # Eğitim koduyla aynı: Sequential(Dropout, Linear)
+        # Match training config: Sequential(Dropout, Linear)
         base.fc = nn.Sequential(
             nn.Dropout(dropout),
             nn.Linear(in_features, num_classes),
         )
 
-        # r3d_18 alt modüllerini doğrudan bağla → state_dict key'leri eşleşir
+        # Bind r3d_18 submodules directly so state_dict keys match the checkpoint
         self.stem    = base.stem
         self.layer1  = base.layer1
         self.layer2  = base.layer2
@@ -51,5 +47,5 @@ class CNN3D(nn.Module):
         return x
 
 
-# Geriye dönük uyumluluk
+# Backward compatibility alias
 CNN_3D = CNN3D

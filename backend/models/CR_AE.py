@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 
-# Eğitim CONFIG'iyle aynı parametreler
 _DEFAULT_CFG = {
     'encoder_filters': [32, 64, 128, 256],
     'lstm_hidden': 256,
@@ -15,23 +14,22 @@ _DEFAULT_CFG = {
 class ConvolutionalRecurrentAutoencoder(nn.Module):
     """
     CR-AE: Convolutional Recurrent Autoencoder
-    Eğitim kodundaki CRAE sınıfının birebir kopyası.
 
-    Giriş : (batch, seq_len, 1, 128, 128)  — tek kanal (grayscale), [0, 1]
-    Çıkış : (batch, seq_len, 1, 128, 128)
+    Input : (batch, seq_len, 1, 128, 128)  — grayscale, [0, 1]
+    Output: (batch, seq_len, 1, 128, 128)
 
-    Mimari: Conv2D Encoder → Linear Proj → LSTM → Linear Unproj → ConvT2D Decoder
+    Architecture: Conv2D Encoder -> Linear Proj -> LSTM -> Linear Unproj -> ConvT2D Decoder
     """
 
     def __init__(self, cfg=None):
         super().__init__()
         cfg = cfg or _DEFAULT_CFG
 
-        f = cfg['encoder_filters']          # [32, 64, 128, 256]
-        self.spatial = f[-1] * 8 * 8        # 256 * 8 * 8 = 16384  (128 → 8 px, 4 stride-2 conv)
-        lstm_h = cfg['lstm_hidden']          # 256
-        drop = cfg['dropout']               # 0.3
-        self.sequence_length = cfg['frames_per_clip']  # 16
+        f = cfg['encoder_filters']
+        self.spatial = f[-1] * 8 * 8        # 256 * 8 * 8 = 16384  (128 -> 8px after 4x stride-2 conv)
+        lstm_h = cfg['lstm_hidden']
+        drop = cfg['dropout']
+        self.sequence_length = cfg['frames_per_clip']
 
         self.encoder = nn.Sequential(
             nn.Conv2d(1, f[0], 3, stride=2, padding=1), nn.BatchNorm2d(f[0]), nn.LeakyReLU(0.2),
@@ -67,21 +65,18 @@ class ConvolutionalRecurrentAutoencoder(nn.Module):
         )
 
     def forward(self, clip: torch.Tensor) -> torch.Tensor:
-        """
-        clip: (B, T, 1, H, W)
-        returns: (B, T, 1, H, W)
-        """
+        """clip: (B, T, 1, H, W) -> (B, T, 1, H, W)"""
         B, T, C, H, W = clip.shape
 
-        x = self.encoder(clip.view(B * T, C, H, W))      # (B*T, 256, 8, 8)
-        x = self.proj(x.view(B * T, -1)).view(B, T, -1)  # (B, T, 256)
-        x, _ = self.lstm(x)                               # (B, T, 256)
-        x = self.unproj(x.reshape(B * T, -1))             # (B*T, 16384)
+        x = self.encoder(clip.view(B * T, C, H, W))
+        x = self.proj(x.view(B * T, -1)).view(B, T, -1)
+        x, _ = self.lstm(x)
+        x = self.unproj(x.reshape(B * T, -1))
         x = x.view(B * T, 256, 8, 8)
-        x = self.decoder(x)                               # (B*T, 1, 128, 128)
+        x = self.decoder(x)
         return x.view(B, T, 1, H, W)
 
 
-# Geriye dönük uyumluluk
+# Backward compatibility aliases
 CRAE = ConvolutionalRecurrentAutoencoder
 CR_AE = ConvolutionalRecurrentAutoencoder
