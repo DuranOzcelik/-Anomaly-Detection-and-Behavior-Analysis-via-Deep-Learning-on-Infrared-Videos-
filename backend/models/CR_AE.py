@@ -1,139 +1,87 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+
+# Eğitim CONFIG'iyle aynı parametreler
+_DEFAULT_CFG = {
+    'encoder_filters': [32, 64, 128, 256],
+    'lstm_hidden': 256,
+    'lstm_layers': 2,
+    'dropout': 0.3,
+    'frames_per_clip': 16,
+    'frame_size': 128,
+}
+
 
 class ConvolutionalRecurrentAutoencoder(nn.Module):
-    """Convolutional Recurrent Autoencoder for anomaly detection via reconstruction error"""
+    """
+    CR-AE: Convolutional Recurrent Autoencoder
+    Eğitim kodundaki CRAE sınıfının birebir kopyası.
 
-    def __init__(self, input_channels=3, latent_dim=128, sequence_length=10):
-        super(ConvolutionalRecurrentAutoencoder, self).__init__()
+    Giriş : (batch, seq_len, 1, 128, 128)  — tek kanal (grayscale), [0, 1]
+    Çıkış : (batch, seq_len, 1, 128, 128)
 
-        self.input_channels = input_channels
-        self.latent_dim = latent_dim
-        self.sequence_length = sequence_length
+    Mimari: Conv2D Encoder → Linear Proj → LSTM → Linear Unproj → ConvT2D Decoder
+    """
 
-        # Encoder
+    def __init__(self, cfg=None):
+        super().__init__()
+        cfg = cfg or _DEFAULT_CFG
+
+        f = cfg['encoder_filters']          # [32, 64, 128, 256]
+        self.spatial = f[-1] * 8 * 8        # 256 * 8 * 8 = 16384  (128 → 8 px, 4 stride-2 conv)
+        lstm_h = cfg['lstm_hidden']          # 256
+        drop = cfg['dropout']               # 0.3
+        self.sequence_length = cfg['frames_per_clip']  # 16
+
         self.encoder = nn.Sequential(
-            nn.Conv2d(input_channels, 32, kernel_size=4, stride=2, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(128, 256, kernel_size=4, stride=2, padding=1),
-            nn.ReLU(),
+            nn.Conv2d(1, f[0], 3, stride=2, padding=1), nn.BatchNorm2d(f[0]), nn.LeakyReLU(0.2),
+            nn.Conv2d(f[0], f[1], 3, stride=2, padding=1), nn.BatchNorm2d(f[1]), nn.LeakyReLU(0.2),
+            nn.Conv2d(f[1], f[2], 3, stride=2, padding=1), nn.BatchNorm2d(f[2]), nn.LeakyReLU(0.2),
+            nn.Conv2d(f[2], f[3], 3, stride=2, padding=1), nn.BatchNorm2d(f[3]), nn.LeakyReLU(0.2),
+            nn.Dropout2d(drop),
         )
 
-        # LSTM for temporal encoding
-        self.lstm_encoder = nn.LSTM(
-            input_size=256 * 4 * 4,
-            hidden_size=latent_dim,
-            num_layers=2,
-            batch_first=True
+        self.proj = nn.Sequential(
+            nn.Linear(self.spatial, lstm_h),
+            nn.LeakyReLU(0.2),
         )
 
-        # LSTM for temporal decoding
-        self.lstm_decoder = nn.LSTM(
-            input_size=latent_dim,
-            hidden_size=256 * 4 * 4,
-            num_layers=2,
-            batch_first=True
+        self.lstm = nn.LSTM(
+            input_size=lstm_h,
+            hidden_size=lstm_h,
+            num_layers=cfg['lstm_layers'],
+            batch_first=True,
+            dropout=drop if cfg['lstm_layers'] > 1 else 0,
         )
 
-        # Decoder
+        self.unproj = nn.Sequential(
+            nn.Linear(lstm_h, self.spatial),
+            nn.LeakyReLU(0.2),
+        )
+
         self.decoder = nn.Sequential(
-            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1),
-            nn.ReLU(),
-            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1),
-            nn.ReLU(),
-            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1),
-            nn.ReLU(),
-            nn.ConvTranspose2d(32, input_channels, kernel_size=4, stride=2, padding=1),
-            nn.Sigmoid(),
+            nn.ConvTranspose2d(f[3], f[2], 3, stride=2, padding=1, output_padding=1), nn.BatchNorm2d(f[2]), nn.LeakyReLU(0.2),
+            nn.ConvTranspose2d(f[2], f[1], 3, stride=2, padding=1, output_padding=1), nn.BatchNorm2d(f[1]), nn.LeakyReLU(0.2),
+            nn.ConvTranspose2d(f[1], f[0], 3, stride=2, padding=1, output_padding=1), nn.BatchNorm2d(f[0]), nn.LeakyReLU(0.2),
+            nn.ConvTranspose2d(f[0], 1,    3, stride=2, padding=1, output_padding=1), nn.Sigmoid(),
         )
 
-    def encode(self, x):
+    def forward(self, clip: torch.Tensor) -> torch.Tensor:
         """
-        Encode input sequence to latent representation
-        x: (batch, sequence_length, channels, height, width)
+        clip: (B, T, 1, H, W)
+        returns: (B, T, 1, H, W)
         """
-        batch_size, seq_len, c, h, w = x.size()
+        B, T, C, H, W = clip.shape
 
-        # Encode each frame
-        x_encoded = []
-        for t in range(seq_len):
-            frame = x[:, t, :, :, :]
-            encoded = self.encoder(frame)
-            encoded = encoded.view(batch_size, -1)
-            x_encoded.append(encoded)
-
-        x_encoded = torch.stack(x_encoded, dim=1)  # (batch, seq_len, 256*4*4)
-
-        # LSTM encoding
-        _, (h_n, c_n) = self.lstm_encoder(x_encoded)
-
-        return h_n[-1], x_encoded
-
-    def decode(self, latent, x_encoded):
-        """
-        Decode latent representation to output sequence
-        latent: (batch, latent_dim)
-        x_encoded: (batch, seq_len, 256*4*4)
-        """
-        batch_size = latent.size(0)
-
-        # Repeat latent vector for each timestep
-        latent_expanded = latent.unsqueeze(1).repeat(1, self.sequence_length, 1)
-
-        # Initialize hidden states for decoder LSTM
-        h_0 = x_encoded[:, -1, :].unsqueeze(0).expand(2, batch_size, -1).contiguous()
-        c_0 = torch.zeros(2, batch_size, 256 * 4 * 4, device=x_encoded.device)
-
-        # LSTM decoding
-        decoded, _ = self.lstm_decoder(latent_expanded, (h_0, c_0))  # (batch, seq_len, 256*4*4)
-
-        # Decode each frame
-        x_decoded = []
-        for t in range(self.sequence_length):
-            frame_latent = decoded[:, t, :].view(batch_size, 256, 4, 4)
-            decoded_frame = self.decoder(frame_latent)
-            x_decoded.append(decoded_frame)
-
-        x_decoded = torch.stack(x_decoded, dim=1)  # (batch, seq_len, channels, height, width)
-
-        return x_decoded
-
-    def forward(self, x):
-        """
-        Forward pass through autoencoder
-        x: (batch, sequence_length, channels, height, width)
-        """
-        latent, x_encoded = self.encode(x)
-        reconstructed = self.decode(latent, x_encoded)
-        return reconstructed
-
-    def get_reconstruction_error(self, x, reduction='mean'):
-        """
-        Calculate MSE reconstruction error
-        x: input tensor (batch, sequence_length, channels, height, width)
-        returns: MSE loss per sample or mean
-        """
-        reconstructed = self.forward(x)
-
-        # Calculate MSE
-        mse_loss = F.mse_loss(reconstructed, x, reduction='none')
-
-        # Reduce over all dimensions except batch
-        mse_loss = mse_loss.view(mse_loss.size(0), -1).mean(dim=1)
-
-        if reduction == 'mean':
-            return mse_loss.mean()
-        elif reduction == 'none':
-            return mse_loss
-        else:
-            return mse_loss.mean()
+        x = self.encoder(clip.view(B * T, C, H, W))      # (B*T, 256, 8, 8)
+        x = self.proj(x.view(B * T, -1)).view(B, T, -1)  # (B, T, 256)
+        x, _ = self.lstm(x)                               # (B, T, 256)
+        x = self.unproj(x.reshape(B * T, -1))             # (B*T, 16384)
+        x = x.view(B * T, 256, 8, 8)
+        x = self.decoder(x)                               # (B*T, 1, 128, 128)
+        return x.view(B, T, 1, H, W)
 
 
-class CR_AE(ConvolutionalRecurrentAutoencoder):
-    """Alias for ConvolutionalRecurrentAutoencoder"""
-    pass
+# Geriye dönük uyumluluk
+CRAE = ConvolutionalRecurrentAutoencoder
+CR_AE = ConvolutionalRecurrentAutoencoder
