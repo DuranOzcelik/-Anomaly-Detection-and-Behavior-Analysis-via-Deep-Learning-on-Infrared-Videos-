@@ -2,6 +2,11 @@
 
 A Windows desktop application for real-time infrared surveillance video analysis. The system detects anomalous events and classifies behavior types using a cascaded deep learning pipeline, visualizing results through heatmap overlays streamed live to the UI.
 
+**Authors:** 
+- Duran Özçelik ([@DuranOzcelik](https://github.com/DuranOzcelik))
+- Ahmet Topuz ([@Ahmetft](https://github.com/Ahmetft))
+- Yusuf Kerem Küçükmehmetoğlu ([@Yukeku](https://github.com/Yukeku))
+
 ---
 
 ## Overview
