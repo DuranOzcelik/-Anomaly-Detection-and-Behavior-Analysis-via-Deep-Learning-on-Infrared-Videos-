@@ -51,5 +51,13 @@ backend/temp_videos/
 backend/model_cache/
 backend/archive/
 
+# Model weights
+*.pth
+*.ckpt
+
+# Datasets (too large for git)
+datasets/
+data/
+
 # Claude Code
 .claude/

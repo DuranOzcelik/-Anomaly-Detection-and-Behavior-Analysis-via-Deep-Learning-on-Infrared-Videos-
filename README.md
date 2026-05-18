@@ -255,6 +255,46 @@ ThesisApp/
 
 ---
 
+## Notebooks & Training
+
+Jupyter notebooks for model training and evaluation are available in the `notebooks/` directory:
+
+- **training_crae.ipynb** — Train the Convolutional Recurrent Autoencoder on normal-only footage
+- **training_3dcnn.ipynb** — Train the 3D-CNN behavior classifier on the labeled LTD dataset
+- **evaluation.ipynb** — Evaluate both models and generate classification metrics
+
+These notebooks are designed to run in **Google Colab** with GPU acceleration. Open them in Colab, mount your Google Drive, and follow the embedded instructions.
+
+### LTD Dataset
+
+The **LTD (Long-Term Dataset)** is a publicly available infrared surveillance video dataset. To download and set up the dataset:
+
+1. Visit the [LTD Dataset GitHub repository](https://github.com/LTD-Dataset)
+2. Follow the instructions to download the dataset
+3. Place the dataset in a folder on Google Drive under `Shared drives / Data / LTD/` (or update the path in the notebooks to match your Drive structure)
+4. Update the dataset path in each notebook's configuration cell before running
+
+Alternatively, run the provided `notebooks/download_dataset.py` script to automatically fetch the dataset from Drive:
+
+```bash
+cd notebooks
+python download_dataset.py
+```
+
+---
+
+## Authors
+
+This project was developed as a graduation thesis (BIM437) at the Department of Computer Engineering.
+
+| Name | GitHub |
+|------|--------|
+| Duran Özçelik | [@DuranOzcelik](https://github.com/DuranOzcelik) |
+| Ahmet Topuz | [@Ahmetft](https://github.com/Ahmetft) |
+| Yusuf Kerem Küçükmehmetoğlu | [@Yukeku](https://github.com/Yukeku) |
+
+---
+
 ## Acknowledgements
 
 - [LTD Dataset](https://github.com/LTD-Dataset) — infrared surveillance video dataset used for training and evaluation
